@@ -26,6 +26,14 @@ model = SimpleNN()
 model.load_state_dict(torch.load("Project/simple_nn_model.pth"))
 model.eval()
 
+# Count the number of parameters
+total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print("Total number of parameters:", total_params)
+
+# Estimate memory usage (assuming 4 bytes per parameter)
+memory_usage_bytes = total_params * 4
+print("Estimated memory usage:", memory_usage_bytes, "bytes")
+
 # Define your specific input
 input_data = torch.tensor(
     [1.0, 0.0, 0.0, 0.0, 0.5, 0.0], requires_grad=True

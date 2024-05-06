@@ -73,13 +73,17 @@ for epoch in range(num_epochs):
     model.eval()
     with torch.no_grad():
         val_outputs = model(val_inputs)
-        prediction_error = torch.abs(val_outputs - val_targets).mean().item()
+        prediction_error = (
+            100
+            * torch.abs(val_outputs - val_targets).mean().item()
+            / torch.abs(val_targets.mean())
+        )  # Percentage error
         prediction_errors.append(prediction_error)
 
     # Logging every 100 epochs
     if (epoch + 1) % 100 == 0:
         print(
-            f"Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.14f}, Prediction Error: {prediction_error:.14f}"
+            f"Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.14f}, Prediction Relative Percent Error: {prediction_error:.14f}"
         )
 
 # Optionally, save the trained model
@@ -97,9 +101,9 @@ plt.show()
 
 # Plot the prediction errors for verification
 plt.figure()
-plt.semilogy(prediction_errors, color="red")
+plt.plot(prediction_errors, color="red")
 plt.xlabel(r"Training Epoch")
-plt.ylabel(r"Mean Prediction Error, Validation Dataset")
+plt.ylabel(r"Prediction Relative Percent Error, Validation Dataset")
 plt.grid(True, which="both", linestyle="--")
 plt.savefig("Project/PredictionError.pdf", format="pdf")
 plt.show()
