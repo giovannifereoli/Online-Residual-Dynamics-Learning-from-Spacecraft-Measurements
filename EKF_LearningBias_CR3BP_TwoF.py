@@ -2,14 +2,67 @@ import numpy as np
 from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+from numpy.polynomial.legendre import Legendre
+import numpy as np
+from numpy.polynomial.legendre import Legendre
 
-
-class CR3BP:
-    def __init__(self, mu=0.012150583925359):
+class FilterDynamics:
+    def __init__(self, num_polynomials=3, mu=0.012150583925359):
+        """
+        Initialize the dynamics model for the filter, with weights as part of the state.
+        
+        Args:
+            num_polynomials (int): Number of polynomial terms for the bias acceleration.
+            mu (float): Gravitational parameter for the CR3BP model.
+        """
         self.mu = mu
+        self.num_polynomials = num_polynomials
 
-    def dynamics(self, t, y):
-        x, y, z, vx, vy, vz = y
+    def polynomial_acceleration(self, state_components, weights):
+        """
+        Compute the bias acceleration using Legendre polynomials based on the state vector components.
+        
+        Args:
+            state_components (np.ndarray): Vector of [x, y, z, vx, vy, vz] from the state vector.
+            weights (np.ndarray): Polynomial weights for the bias acceleration.
+        
+        Returns:
+            np.ndarray: The bias acceleration as a vector [bias_x, bias_y, bias_z].
+        """
+        x, y, z, vx, vy, vz = state_components
+
+        # Create an input vector for the polynomial based on the state vector components
+        input_vector = np.array([x, y, z, vx, vy, vz])
+
+        # Compute the bias for each direction (x, y, z) using Legendre polynomials
+        bias_x = Legendre(weights[:self.num_polynomials])(input_vector)
+        bias_y = Legendre(weights[self.num_polynomials:2*self.num_polynomials])(input_vector)
+        bias_z = Legendre(weights[2*self.num_polynomials:])(input_vector)
+
+        return np.array([bias_x, bias_y, bias_z])
+
+    def dynamics_stm(self, t, state):
+        """
+        Compute the dynamics and STM evolution, with the weights as part of the state.
+        
+        Args:
+            t (float): Current time.
+            state (np.ndarray): State vector, including STM flattened and the polynomial weights.
+        
+        Returns:
+            np.ndarray: Time derivative of the state and STM.
+        """
+        # Extract the STM and state
+        num_weights = self.num_polynomials * 3  # We have weights for x, y, and z, each with `num_polynomials` terms
+        stm = np.reshape(state[6 + num_weights:], (6 + num_weights, 6 + num_weights))
+        
+        # Extract the position, velocity, and polynomial weights from the state
+        x, y, z, vx, vy, vz = state[:6]
+        weights_x = state[6:6 + self.num_polynomials]
+        weights_y = state[6 + self.num_polynomials:6 + 2 * self.num_polynomials]
+        weights_z = state[6 + 2 * self.num_polynomials:6 + 3 * self.num_polynomials]
+        
+        # CRTBP absolute dynamics
         r1 = np.sqrt((x + self.mu) ** 2 + y**2 + z**2)
         r2 = np.sqrt((x - (1 - self.mu)) ** 2 + y**2 + z**2)
         ax = (
@@ -20,34 +73,53 @@ class CR3BP:
         )
         ay = -2 * vx + y - (1 - self.mu) * y / r1**3 - self.mu * y / r2**3
         az = -(1 - self.mu) * z / r1**3 - self.mu * z / r2**3
-        return [vx, vy, vz, ax, ay, az]
 
-    def dynamics_stm(self, t, y):
-        stm = np.reshape(y[6:], (6, 6))
-        x, y, z, vx, vy, vz = y[:6]
+        # Bias acceleration using polynomial expansion, dependent on state components
+        state_components = np.array([x, y, z, vx, vy, vz])
+        weights = np.concatenate([weights_x, weights_y, weights_z])
+        bias_acceleration = self.polynomial_acceleration(state_components, weights)
 
+        # Total acceleration (dynamics + bias)
+        ax_total = ax + bias_acceleration[0]
+        ay_total = ay + bias_acceleration[1]
+        az_total = az + bias_acceleration[2]
+
+        # STM dynamics
+        A_prime = self.jacobian(t, np.array([x, y, z, vx, vy, vz]))
+        d_stm = np.dot(A_prime, stm)
+
+        # The derivative of the state (position, velocity, and weights)
+        d_state = [
+            vx,  # dx/dt = vx
+            vy,  # dy/dt = vy
+            vz,  # dz/dt = vz
+            ax_total,  # dvx/dt = ax + bias_ax
+            ay_total,  # dvy/dt = ay + bias_ay
+            az_total,  # dvz/dt = az + bias_az
+        ]
+
+        # No dynamics are assumed for the weights (they are constant coefficients), so their derivative is zero
+        d_weights = np.zeros(3 * self.num_polynomials)
+
+        # Return the combined state derivative and flattened STM
+        return d_state + d_weights.tolist() + d_stm.flatten().tolist()
+
+    def jacobian(self, t, state):
+        """
+        Compute the Jacobian matrix (A') for the state.
+        
+        Args:
+            t (float): Current time.
+            state (np.ndarray): State vector.
+        
+        Returns:
+            np.ndarray: The Jacobian matrix including the STM part.
+        """
+        x, y, z, vx, vy, vz = state[:6]
+
+        # Variational equations CR3BP
         r1 = np.sqrt((x + self.mu) ** 2 + y**2 + z**2)
         r2 = np.sqrt((x - (1 - self.mu)) ** 2 + y**2 + z**2)
-        ax = (
-            2 * vy
-            + x
-            - (1 - self.mu) * (x + self.mu) / r1**3
-            - self.mu * (x - (1 - self.mu)) / r2**3
-        )
-        ay = -2 * vx + y - (1 - self.mu) * y / r1**3 - self.mu * y / r2**3
-        az = -(1 - self.mu) * z / r1**3 - self.mu * z / r2**3
-
-        A = self.jacobian(t, np.array([x, y, z, vx, vy, vz]))
-        d_stm = np.dot(A, stm)
-
-        return [vx, vy, vz, ax, ay, az] + d_stm.flatten().tolist()
-
-    def jacobian(self, t, y):
-        x, y, z, vx, vy, vz = y
-        r1 = np.sqrt((x + self.mu) ** 2 + y**2 + z**2)
-        r2 = np.sqrt((x - (1 - self.mu)) ** 2 + y**2 + z**2)
-
-        # Variational equations
         df1dx = (
             1
             - (1 - self.mu) / r1**3
@@ -78,7 +150,7 @@ class CR3BP:
             + 3 * self.mu * z**2 / r2**5
         )
 
-        # Jacobian
+        # Jacobian CR3BP
         A = np.array(
             [
                 [0, 0, 0, 1, 0, 0],
@@ -89,8 +161,12 @@ class CR3BP:
                 [df1dz, df2dz, df3dz, 0, 0, 0],
             ]
         )
-        return A
 
+        # Augmented Jacobian for the STM
+        D = np.zeros((3 * self.num_polynomials, 6))  # No dynamics for the weights
+        A_prime = np.block([[A, np.zeros((6, 3 * self.num_polynomials))], [D]])
+
+        return A_prime
 
 class BCR4BP_SRP:
     def __init__(
@@ -144,7 +220,7 @@ class BCR4BP_SRP:
         )  # OSS: N x km^-2
         Cr = 1  # OSS: unitless
         A = 1e-6 / self.l_star**2  # s/c of 1 m^2
-        m = 2000 / self.m_star  # s/c of 2000 kg
+        m = 2000 / self.m_star  # s/c of 1000 kg
         if self.SRP_flag:
             dist_coeff = 1
         else:
@@ -196,14 +272,13 @@ class MeasurementModel:
 
 
 class ExtendedKalmanFilter:
-    def __init__(self, dynamicalModel, measurementModel, Q, R, x0, P0, SNC_flag=True):
+    def __init__(self, dynamicalModel, measurementModel, Q, R, x0, P0):
         self.dynamicalModel = dynamicalModel  # Dynamical model
         self.measurementModel = measurementModel  # Measurement model
         self.Q = Q  # Process noise covariance
         self.R = R  # Measurement noise covariance
         self.x = x0  # Initial state deviation estimate
         self.P = P0  # Initial covariance estimate
-        self.SNC_flag = SNC_flag  # Flag for SNC
         self.n = len(x0)  # State dimension
 
     def predict(self, dt):
@@ -221,20 +296,9 @@ class ExtendedKalmanFilter:
         # Predict state using the dynamical model
         self.x = sol.y[: self.n, -1]
 
-        # State Noise Compensation (SNC, prevents filter saturation)
-        if self.SNC_flag:
-            Q_snc = np.vstack(
-                (
-                    np.hstack((dt**3 / 3 * self.Q, dt**2 / 2 * self.Q)),
-                    np.hstack((dt**2 / 2 * self.Q, dt * self.Q)),
-                )
-            )
-        else:
-            Q_snc = np.zeros((self.n, self.n))
-
         # Predict covariance (with SNC method)
         F = np.reshape(sol.y[self.n :, -1], (self.n, self.n))
-        self.P = np.dot(np.dot(F, self.P), F.T) + Q_snc
+        self.P = np.dot(np.dot(F, self.P), F.T) 
 
     def update(self, z):
         # Calculate Kalman gain
@@ -251,11 +315,77 @@ class ExtendedKalmanFilter:
         # Update covariance estimate
         self.P = self.P - np.dot(np.dot(K, H), self.P)
         self.P = 0.5 * (self.P + self.P.T)  # OSS: Ensure symmetry
+        
 
+''''
+class ConsiderBatchLeastSquaresFilter:
+    def __init__(self, R, P_c0):
+        """
+        Initialize the Batch Least Squares Consider Filter.
+        
+        Args:
+            R (np.ndarray): Measurement noise covariance matrix (m x m).
+            P_c0 (np.ndarray): Initial covariance matrix for the consider parameters.
+        """
+        self.R = R  # Measurement noise covariance
+        self.P_c = P_c0  # Covariance for the consider parameters
+    
+    def estimate(self, H_list, y_list, stm_list, G_list, Q_c_list):
+        """
+        Perform the batch least squares estimation with time-varying effects and consider parameters.
+        
+        Args:
+            H_list (list of np.ndarray): List of measurement matrices (one per time step), each of size (m x n).
+            y_list (list of np.ndarray): List of measurement vectors (one per time step), each of size (m x 1).
+            stm_list (list of np.ndarray): List of state transition matrices (STM) for each time step, each of size (n x n).
+            G_list (list of np.ndarray): List of sensitivity matrices for the consider parameters at each time step (n x p).
+            Q_c_list (list of np.ndarray): List of covariance matrices for the consider parameters at each time step (p x p).
+        
+        Returns:
+            x_hat (np.ndarray): Estimated state vector (n x 1).
+            P_x (np.ndarray): Covariance matrix of the state estimate (n x n), including consider parameter impact.
+            P_c_accum (np.ndarray): Accumulated covariance contribution from consider parameters.
+        """
+        # Accumulate the time-varying effects into a single batch estimation
+        H_accum = []
+        y_accum = []
+        P_c_accum = np.zeros_like(self.P_c)  # Initialize the consider covariance contribution
+        
+        # Propagate the system's time-varying matrices, measurements, and consider parameter effects
+        for i in range(len(stm_list)):
+            H_i = H_list[i]
+            y_i = y_list[i]
+            stm_i = stm_list[i]
+            G_i = G_list[i]
+            Q_c_i = Q_c_list[i]
+            
+            # Adjust H_i using the STM to propagate measurements backwards in time
+            H_accum.append(np.dot(H_i, stm_i))
+            y_accum.append(y_i)
+            
+            # Propagate the consider parameter covariance
+            self.P_c = np.dot(np.dot(stm_i, self.P_c), stm_i.T) + np.dot(np.dot(G_i, Q_c_i), G_i.T)
+            P_c_accum += self.P_c  # Accumulate the consider parameter effect on covariance
+        
+        # Stack the measurement matrix and vectors to form the final batch problem
+        H_batch = np.vstack(H_accum)
+        y_batch = np.vstack(y_accum)
+        
+        # Perform the least squares estimation
+        R_inv = np.linalg.inv(self.R)
+        H_T_R_inv = np.dot(H_batch.T, R_inv)  # H^T * R^-1
+        HTRH_inv = np.linalg.inv(np.dot(H_T_R_inv, H_batch))  # (H^T * R^-1 * H)^-1
+        x_hat = np.dot(HTRH_inv, np.dot(H_T_R_inv, y_batch))  # x_hat = (H^T * R^-1 * H)^-1 * H^T * R^-1 * y_batch
+        
+        # Covariance of the state estimate, with the contribution from the consider parameters
+        P_x = HTRH_inv + P_c_accum  # Total state covariance including consider parameters
+        
+        return x_hat, P_x, P_c_accum
+'''
 
 # Define dynamics
 # OSS: Earth-Moon system as default
-cr3bp = CR3BP()  # Reference dynamics
+filter_dynamics = filter_dynamics()  # Reference dynamics
 bcr4bp_srp = BCR4BP_SRP()  # True dynamics
 
 # Measurement model setup
@@ -266,16 +396,7 @@ measurement_model = MeasurementModel(gs_state)
 # Initial conditions (x, y, z, vx, vy, vz)
 # HP: let's consider a planar trajectory for now.
 # OSS: l_star=3.844*1e5 km, t_star=375200 s
-initial_state_true = np.array(
-    [
-        1.02206694e00,
-        -1.32282592e-07,
-        -1.82100000e-01,
-        -1.69229909e-07,
-        -1.03353155e-01,
-        6.44013821e-07,
-    ]
-)  # 9:2 NRO - 50m after apolune, already corrected, rt = 399069639.7170633, vt = 105.88740083894766
+initial_state_true = np.array([1, 0, 0, 0, 0.5, 0])
 sigma_pos = 1e-6  # OSS: 1e-6 is 1ish km
 sigma_vel = 1e-4  # OSS: 1e-4 is 1ish m/s
 sigma_state = np.array([sigma_pos, sigma_pos, 0, sigma_vel, sigma_vel, 0])
@@ -322,7 +443,7 @@ n = len(x0)  # length of state vector
 P0 = np.diag(np.square(sigma_state))  # Initial covariance estimate
 
 # Initialize Kalman filter
-ekf = ExtendedKalmanFilter(cr3bp, measurement_model, Q, R, x0, P0)
+ekf = ExtendedKalmanFilter(filter_dynamics, measurement_model, Q, R, x0, P0)
 
 # Run Kalman filter
 filtered_state = np.zeros((n, len(t_eval) - 1))

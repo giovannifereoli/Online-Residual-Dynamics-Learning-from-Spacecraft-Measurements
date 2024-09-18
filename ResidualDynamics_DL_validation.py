@@ -4,6 +4,10 @@ import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 
+# TODO: data augmentation and transfer learning
+# TODO: different fancier models, LSTMs to PINNs
+# TODO: more learning into-the-loop
+
 # Define the neural network architecture
 torch.set_default_dtype(torch.float64)
 
